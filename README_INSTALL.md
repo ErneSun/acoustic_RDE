@@ -6,7 +6,7 @@
 
 ```bash
 # 创建虚拟环境
-python -m venv .venv
+python3 -m venv .venv
 
 # 激活虚拟环境
 # macOS/Linux:
