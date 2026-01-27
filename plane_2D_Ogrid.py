@@ -14,11 +14,14 @@ import multiprocessing as mp
 from functools import partial
 import meshio
 
+# 导入参数控制模块
+from control import control, validate_params
+
 # 导入mesh.py的网格生成函数（或者直接复制相关代码）
 # 为了简化，我们直接在这里实现网格生成，与mesh.py保持一致
 
 # ==================== 网格生成（从mesh.py） ====================
-def generate_ogrid_mesh(R=0.01, r_core=0.002, dr=0.0002):
+def generate_ogrid_mesh(R, r_core, dr, dtheta_base):
     """
     生成非结构化O网格（环形网格）
     
@@ -26,6 +29,7 @@ def generate_ogrid_mesh(R=0.01, r_core=0.002, dr=0.0002):
         R: 外半径 [m]
         r_core: 内半径 [m]
         dr: 径向网格间距 [m]
+        dtheta_base: 角度间距基准值 [m]
     
     返回:
         nodes: 节点坐标 [N, 3]
@@ -34,7 +38,7 @@ def generate_ogrid_mesh(R=0.01, r_core=0.002, dr=0.0002):
         cell_areas: 单元面积 [M]
         cell_neighbors: 单元邻居关系
     """
-    dtheta = 0.0002 / R  # 角度间距
+    dtheta = dtheta_base / R  # 角度间距
     
     # 生成r数组
     r = np.arange(r_core, R + dr/2, dr)
@@ -126,33 +130,10 @@ def generate_ogrid_mesh(R=0.01, r_core=0.002, dr=0.0002):
     return nodes, cells, cell_centers, cell_areas, cell_neighbors, nr, ntheta
 
 
-# ==================== 物理参数 ====================
-rho0 = 1.225        # 空气密度 [kg/m³]
-c0   = 343.0        # 声速 [m/s]
-nu   = 1.5e-5       # 运动黏度 [m²/s]
-# 注意：nu用于速度方程中的黏性项 nu*laplacian(u)
-# 对于线性声学方程，这可以视为：
-# 1) 人工数值耗散（用于稳定性），或
-# 2) 声学吸收（但通常声学吸收系数不同）
-# 当前实现主要用于数值稳定性，实际物理耗散很小
-
-# ==================== 几何参数 ====================
-R      = 0.01         # 外半径 [m]
-r_core = 0.002        # 内半径 [m]
-dr     = 0.0002       # 径向网格间距 [m]
-
-# ==================== 时间参数 ====================
-dt    = 1e-9        # 时间步长 [s]
-t_end = 1e-3        # 结束时间 [s]
-
-# ==================== 声源参数 ====================
-wave_pressure = 10.0      # 爆轰波压强幅度 [Pa]
-v_rde = 1400.0            # 爆轰波传播速度 [m/s]
-inner_r  = r_core         # 环带内半径 [m]
-outer_r  = R              # 环带外半径 [m]
-omega    = v_rde / R      # 角速度 [rad/s]
-sigma    = 0.001          # 衰减尺度 [m]
-tau = 2 * np.pi * R / v_rde  # 特征时间 [s]
+# ==================== 参数说明 ====================
+# 所有参数现在通过 control() 函数设置
+# 物理参数、几何参数、时间参数、声源参数等都在 control.py 中定义
+# 主程序通过 control() 函数获取这些参数
 
 
 # ==================== 有限体积方法算子 ====================
@@ -403,7 +384,7 @@ def source_term_ogrid(cell_centers, t, inner_r, outer_r, omega, wave_pressure, t
 
 
 # ==================== 边界条件 ====================
-def identify_boundary_cells(nodes, cells, cell_centers, R, r_core, nr, ntheta, tolerance=1.5*0.0002):
+def identify_boundary_cells(nodes, cells, cell_centers, R, r_core, nr, ntheta, tolerance):
     """
     识别边界单元（基于单元是否在边界上，而不仅仅是单元中心距离）
     
@@ -413,7 +394,7 @@ def identify_boundary_cells(nodes, cells, cell_centers, R, r_core, nr, ntheta, t
         cell_centers: 单元中心坐标
         R, r_core: 内外半径
         nr, ntheta: 径向和角度层数
-        tolerance: 容差
+        tolerance: 容差（用于边界识别）
     
     返回:
         inner_wall_cells: 内壁单元索引
@@ -535,9 +516,22 @@ def apply_wall_boundary_conditions_ogrid(u, v, inner_wall_cells, outer_wall_cell
 # ==================== RK4时间积分 ====================
 def rk4_step_ogrid(p, u, v, t, dt, nodes, cells, cell_centers, cell_areas, 
                    cell_neighbors, inner_wall_cells, outer_wall_cells, wall_normals,
-                   boundary_edges=None, use_parallel=False, n_cores=1):
+                   boundary_edges, use_parallel, n_cores,
+                   rho0, c0, nu,
+                   inner_r, outer_r, omega, 
+                   wave_pressure, tau, sigma, R):
     """
     使用RK4方法进行时间积分（非结构化网格版本，支持并行）
+    
+    参数:
+        p, u, v: 场变量
+        t, dt: 时间和时间步长
+        nodes, cells, cell_centers, cell_areas, cell_neighbors: 网格信息
+        inner_wall_cells, outer_wall_cells, wall_normals: 边界信息
+        boundary_edges: 边界边信息
+        use_parallel, n_cores: 并行计算参数
+        rho0, c0, nu: 物理参数
+        inner_r, outer_r, omega, wave_pressure, tau, sigma, R: 声源参数
     """
     def rhs(p_state, u_state, v_state, t_state):
         """计算右端项"""
@@ -588,6 +582,176 @@ def rk4_step_ogrid(p, u, v, t, dt, nodes, cells, cell_centers, cell_areas,
     return p_new, u_new, v_new
 
 
+# ==================== 进度条和日志输出辅助函数 ====================
+def update_progress_bar(progress, width=50, elapsed_time=None, eta=None):
+    """
+    更新并显示进度条
+    
+    参数:
+        progress: 进度百分比 (0-100)
+        width: 进度条宽度
+        elapsed_time: 已用时间（秒）
+        eta: 预计剩余时间（秒）
+    
+    返回:
+        progress_bar_str: 进度条字符串
+    """
+    filled = int(width * progress / 100)
+    bar = '█' * filled + '░' * (width - filled)
+    progress_str = f"\r进度: |{bar}| {progress:.1f}%"
+    
+    if elapsed_time is not None:
+        progress_str += f" | 已用时: {elapsed_time:.1f}s"
+    if eta is not None:
+        progress_str += f" | 预计剩余: {eta:.1f}s"
+    
+    return progress_str
+
+
+def compute_residuals(p_old, u_old, v_old, p_new, u_new, v_new):
+    """
+    计算残差（用于监控收敛性）
+    
+    参数:
+        p_old, u_old, v_old: 上一时间步的场变量
+        p_new, u_new, v_new: 当前时间步的场变量
+    
+    返回:
+        dict: 包含各场变量残差的字典
+    """
+    residuals = {
+        'pressure': np.linalg.norm(p_new - p_old) if len(p_old) > 0 else 0.0,
+        'velocity_u': np.linalg.norm(u_new - u_old) if len(u_old) > 0 else 0.0,
+        'velocity_v': np.linalg.norm(v_new - v_old) if len(v_old) > 0 else 0.0,
+    }
+    residuals['total'] = np.sqrt(residuals['pressure']**2 + 
+                                 residuals['velocity_u']**2 + 
+                                 residuals['velocity_v']**2)
+    return residuals
+
+
+def write_log_entry(log_file_path, n, t, dt, residuals, p, u, v, 
+                   p_min=None, p_max=None, p_mean=None):
+    """
+    写入日志条目
+    
+    参数:
+        log_file_path: 日志文件路径
+        n: 时间步数
+        t: 当前时间
+        dt: 时间步长
+        residuals: 残差字典
+        p, u, v: 场变量
+        p_min, p_max, p_mean: 压力统计（可选）
+    """
+    # 计算统计信息（如果未提供）
+    if p_min is None:
+        p_valid = p[p != 0] if len(p) > 0 else p
+        if len(p_valid) > 0:
+            p_min = np.min(p_valid)
+            p_max = np.max(p_valid)
+            p_mean = np.mean(p_valid)
+        else:
+            p_min = p_max = p_mean = 0.0
+    
+    # 写入日志（追加模式）
+    with open(log_file_path, 'a', encoding='utf-8') as f:
+        f.write(f"{n:10d}  {t:.6e}  {dt:.6e}  "
+                f"{residuals['pressure']:.6e}  {residuals['velocity_u']:.6e}  "
+                f"{residuals['velocity_v']:.6e}  {residuals['total']:.6e}  "
+                f"{p_min:.6e}  {p_max:.6e}  {p_mean:.6e}\n")
+
+
+def initialize_log_file(log_file_path):
+    """
+    初始化日志文件，写入表头
+    
+    参数:
+        log_file_path: 日志文件路径
+    """
+    with open(log_file_path, 'w', encoding='utf-8') as f:
+        f.write("# RDE声学模拟 - 计算日志\n")
+        f.write("# " + "=" * 100 + "\n")
+        f.write("# 列说明:\n")
+        f.write("#   1. 时间步数 (n)\n")
+        f.write("#   2. 当前时间 [s] (t)\n")
+        f.write("#   3. 时间步长 [s] (dt)\n")
+        f.write("#   4. 压力残差 (residual_p)\n")
+        f.write("#   5. 速度u残差 (residual_u)\n")
+        f.write("#   6. 速度v残差 (residual_v)\n")
+        f.write("#   7. 总残差 (residual_total)\n")
+        f.write("#   8. 压力最小值 [Pa] (p_min)\n")
+        f.write("#   9. 压力最大值 [Pa] (p_max)\n")
+        f.write("#  10. 压力平均值 [Pa] (p_mean)\n")
+        f.write("# " + "=" * 100 + "\n")
+        f.write(f"{'n':>10}  {'t':>12}  {'dt':>12}  "
+                f"{'residual_p':>12}  {'residual_u':>12}  {'residual_v':>12}  "
+                f"{'residual_total':>14}  {'p_min':>12}  {'p_max':>12}  {'p_mean':>12}\n")
+
+
+def write_vtk_output(nodes, cells, p, u, v, output_dir, output_idx):
+    """
+    将场变量数据写入VTK文件
+    
+    参数:
+        nodes: 节点坐标
+        cells: 单元连接
+        p, u, v: 场变量（在单元中心）
+        output_dir: 输出目录
+        output_idx: 输出文件索引
+    
+    返回:
+        fname: 输出文件名
+    """
+    fname = f"{output_dir}/acoustic_ogrid_{output_idx:04d}.vtk"
+    n_nodes = len(nodes)
+    n_cells = len(cells)
+    
+    # 将单元中心数据插值到节点（用于可视化）
+    # 简单方法：使用相邻单元的平均值
+    p_nodes = np.zeros(n_nodes)
+    u_nodes = np.zeros(n_nodes)
+    v_nodes = np.zeros(n_nodes)
+    node_cell_count = np.zeros(n_nodes)
+    
+    for i, cell in enumerate(cells):
+        for node_idx in cell:
+            p_nodes[node_idx] += p[i]
+            u_nodes[node_idx] += u[i]
+            v_nodes[node_idx] += v[i]
+            node_cell_count[node_idx] += 1
+    
+    # 平均
+    valid_nodes = node_cell_count > 0
+    p_nodes[valid_nodes] /= node_cell_count[valid_nodes]
+    u_nodes[valid_nodes] /= node_cell_count[valid_nodes]
+    v_nodes[valid_nodes] /= node_cell_count[valid_nodes]
+    
+    # 计算速度大小
+    velocity_magnitude_nodes = np.sqrt(u_nodes**2 + v_nodes**2)
+    
+    # 输出VTK（非结构化网格）
+    mesh = meshio.Mesh(
+        points=nodes,
+        cells=[("quad", cells)],
+        point_data={
+            "pressure": p_nodes,
+            "velocity_u": u_nodes,
+            "velocity_v": v_nodes,
+            "velocity_magnitude": velocity_magnitude_nodes
+        },
+        cell_data={
+            "pressure": [p],
+            "velocity_u": [u],
+            "velocity_v": [v],
+            "velocity_magnitude": [np.sqrt(u**2 + v**2)]
+        }
+    )
+    meshio.write(fname, mesh)
+    
+    return fname
+
+
 # ==================== 并行计算辅助函数 ====================
 # 注意：在Windows上，multiprocessing需要函数在模块级别定义
 def compute_gradient_cell_parallel(args):
@@ -630,6 +794,83 @@ def compute_gradient_cell_parallel(args):
 
 # ==================== 主程序 ====================
 def main():
+    # 从control函数获取所有参数
+    try:
+        params = control()
+    except Exception as e:
+        print(f"错误：无法从control模块获取参数", file=sys.stderr)
+        print(f"详细错误：{e}", file=sys.stderr)
+        print(f"请检查control.py文件是否正确配置", file=sys.stderr)
+        sys.exit(1)
+    
+    # 验证参数完整性和有效性
+    is_valid, missing_params, invalid_params = validate_params(params)
+    if not is_valid:
+        print("=" * 60, file=sys.stderr)
+        print("错误：参数验证失败！", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        
+        # 报告缺少的参数
+        if missing_params:
+            print(f"\n缺少的参数数量: {len(missing_params)}", file=sys.stderr)
+            print("\n缺少的参数列表:", file=sys.stderr)
+            for i, (param, description) in enumerate(missing_params, 1):
+                print(f"  {i}. {param} - {description}", file=sys.stderr)
+        
+        # 报告无效的参数
+        if invalid_params:
+            print(f"\n无效的参数数量: {len(invalid_params)}", file=sys.stderr)
+            print("\n无效的参数列表:", file=sys.stderr)
+            for i, (param, description, reason) in enumerate(invalid_params, 1):
+                print(f"  {i}. {param} - {description}", file=sys.stderr)
+                print(f"     原因: {reason}", file=sys.stderr)
+        
+        print("\n请检查control.py文件中的control()函数，确保：", file=sys.stderr)
+        print("  1. 所有必需参数都已定义", file=sys.stderr)
+        print("  2. 所有参数值都是有效的（不为None，数值参数为正数等）", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        sys.exit(1)
+    
+    # 提取参数（物理参数）
+    rho0 = params['rho0']
+    c0 = params['c0']
+    nu = params['nu']
+    
+    # 提取参数（几何参数）
+    R = params['R']
+    r_core = params['r_core']
+    dr = params['dr']
+    
+    # 提取参数（时间参数）
+    dt = params['dt']
+    t_end = params['t_end']
+    
+    # 提取参数（声源参数）
+    wave_pressure = params['wave_pressure']
+    v_rde = params['v_rde']
+    inner_r = params['inner_r']
+    outer_r = params['outer_r']
+    omega = params['omega']
+    sigma = params['sigma']
+    tau = params['tau']
+    
+    # 提取参数（数值计算参数）
+    filter_strength = params['filter_strength']
+    apply_filter = params['apply_filter']
+    filter_frequency = params['filter_frequency']
+    CFL_max = params['CFL_max']
+    boundary_tolerance = params['boundary_tolerance']
+    
+    # 提取参数（输出参数）
+    output_dir = params['output_dir']
+    output_time_interval = params['output_time_interval']
+    log_time_interval = params['log_time_interval']
+    log_file = params['log_file']
+    progress_bar_width = params['progress_bar_width']
+    
+    # 提取参数（网格生成参数）
+    dtheta_base = params['dtheta_base']
+    
     # 命令行参数解析
     parser = argparse.ArgumentParser(description='RDE声学模拟 - 非结构化O网格版本（支持并行）')
     parser.add_argument('-n', '--ncores', type=int, default=None,
@@ -639,7 +880,7 @@ def main():
     
     args = parser.parse_args()
     
-    # 确定并行核数
+    # 确定并行核数（命令行参数优先，否则使用control中的默认值）
     max_cores = mp.cpu_count()
     if args.single:
         n_cores = 1
@@ -648,9 +889,13 @@ def main():
         n_cores = min(args.ncores, max_cores)
         use_parallel = (n_cores > 1)
     else:
-        # 默认使用最大核数-1（留一个核心给系统）
-        n_cores = max(1, max_cores - 1)
-        use_parallel = (n_cores > 1)
+        # 使用control中的默认值
+        if params['n_cores_default'] is not None:
+            n_cores = min(params['n_cores_default'], max_cores)
+        else:
+            # 默认使用最大核数-1（留一个核心给系统）
+            n_cores = max(1, max_cores - 1)
+        use_parallel = params['use_parallel_default'] and (n_cores > 1)
     
     print(f"系统最大核数: {max_cores}", file=sys.stderr)
     print(f"使用核数: {n_cores}", file=sys.stderr)
@@ -659,7 +904,8 @@ def main():
     
     # 生成网格
     print("正在生成非结构化O网格...", file=sys.stderr)
-    nodes, cells, cell_centers, cell_areas, cell_neighbors, nr, ntheta = generate_ogrid_mesh(R, r_core, dr)
+    nodes, cells, cell_centers, cell_areas, cell_neighbors, nr, ntheta = generate_ogrid_mesh(
+        R, r_core, dr, dtheta_base)
     n_cells = len(cells)
     n_nodes = len(nodes)
     
@@ -667,7 +913,7 @@ def main():
     
     # 识别边界（基于单元节点，更准确）
     inner_wall_cells, outer_wall_cells, wall_normals, boundary_edges = identify_boundary_cells(
-        nodes, cells, cell_centers, R, r_core, nr, ntheta)
+        nodes, cells, cell_centers, R, r_core, nr, ntheta, boundary_tolerance)
     print(f"边界识别: {len(inner_wall_cells)}个内壁单元, {len(outer_wall_cells)}个外壁单元", file=sys.stderr)
     print(f"边界边数量: {len(boundary_edges)}", file=sys.stderr)
     
@@ -681,7 +927,6 @@ def main():
     characteristic_size = min(min_cell_size, mean_cell_size * 0.8)
     
     CFL = c0 * dt / characteristic_size
-    CFL_max = 0.5
     if CFL > CFL_max:
         print(f"警告: CFL数 = {CFL:.4f} > {CFL_max:.2f}，可能导致数值不稳定！", file=sys.stderr)
         print(f"建议: 减小时间步长 dt < {CFL_max * characteristic_size / c0:.2e} s", file=sys.stderr)
@@ -698,115 +943,115 @@ def main():
     nt = int(t_end / dt)
     
     # 输出目录
-    output_dir = "output_ogrid"
     os.makedirs(output_dir, exist_ok=True)
     
-    # 输出和打印频率
-    output_freq = 100000
-    print_freq = max(1, nt // 100)
+    # 初始化日志文件
+    log_file_path = os.path.join(output_dir, log_file)
+    initialize_log_file(log_file_path)
     
-    # 数值滤波参数（与plane_2D.py一致）
-    filter_strength = 0.01  # 滤波强度（0-1），0表示不滤波
-    apply_filter = True  # 是否应用数值滤波
+    # 基于时间的输出控制
+    next_output_time = 0.0  # 下次VTK输出的时间
+    next_log_time = 0.0      # 下次日志输出的时间
+    output_idx = 0          # VTK文件索引
+    
+    # 用于残差计算的上一时间步场变量
+    p_old = p.copy()
+    u_old = u.copy()
+    v_old = v.copy()
     
     # 主循环
     start = time.time()
     print(f"开始模拟: nt={nt}, dt={dt:.2e}s, CFL={CFL:.4f}", file=sys.stderr)
+    print(f"VTK输出时间间隔: {output_time_interval:.2e}s", file=sys.stderr)
+    print(f"日志输出时间间隔: {log_time_interval:.2e}s", file=sys.stderr)
+    print(f"日志文件: {log_file_path}", file=sys.stderr)
+    print("", file=sys.stderr)  # 空行
     
     for n in range(nt):
         t = n * dt
         
         # 使用RK4方法进行时间积分（支持并行）
-        p, u, v = rk4_step_ogrid(p, u, v, t, dt, nodes, cells, cell_centers, 
-                                 cell_areas, cell_neighbors, inner_wall_cells, 
-                                 outer_wall_cells, wall_normals, boundary_edges,
-                                 use_parallel, n_cores)
+        p_new, u_new, v_new = rk4_step_ogrid(p, u, v, t, dt, nodes, cells, cell_centers, 
+                                             cell_areas, cell_neighbors, inner_wall_cells, 
+                                             outer_wall_cells, wall_normals, boundary_edges,
+                                             use_parallel, n_cores,
+                                             rho0, c0, nu,
+                                             inner_r, outer_r, omega, wave_pressure, tau, sigma, R)
         
         # 应用数值滤波（抑制高频振荡，与plane_2D.py一致）
-        if apply_filter and n % 10 == 0:  # 每10步滤波一次
+        if apply_filter and n % filter_frequency == 0:  # 按配置的频率滤波
             # 简单的空间平均滤波（在单元中心之间）
-            p_filtered = p.copy()
-            u_filtered = u.copy()
-            v_filtered = v.copy()
+            p_filtered = p_new.copy()
+            u_filtered = u_new.copy()
+            v_filtered = v_new.copy()
             
             for i in range(n_cells):
                 if len(cell_neighbors[i]) > 0:
                     # 与邻居单元的平均值
-                    neighbor_avg_p = np.mean([p[n] for n in cell_neighbors[i]])
-                    neighbor_avg_u = np.mean([u[n] for n in cell_neighbors[i]])
-                    neighbor_avg_v = np.mean([v[n] for n in cell_neighbors[i]])
+                    neighbor_avg_p = np.mean([p_new[n] for n in cell_neighbors[i]])
+                    neighbor_avg_u = np.mean([u_new[n] for n in cell_neighbors[i]])
+                    neighbor_avg_v = np.mean([v_new[n] for n in cell_neighbors[i]])
                     
-                    p_filtered[i] = (1 - filter_strength) * p[i] + filter_strength * neighbor_avg_p
-                    u_filtered[i] = (1 - filter_strength) * u[i] + filter_strength * neighbor_avg_u
-                    v_filtered[i] = (1 - filter_strength) * v[i] + filter_strength * neighbor_avg_v
+                    p_filtered[i] = (1 - filter_strength) * p_new[i] + filter_strength * neighbor_avg_p
+                    u_filtered[i] = (1 - filter_strength) * u_new[i] + filter_strength * neighbor_avg_u
+                    v_filtered[i] = (1 - filter_strength) * v_new[i] + filter_strength * neighbor_avg_v
             
-            p, u, v = p_filtered, u_filtered, v_filtered
+            p_new, u_new, v_new = p_filtered, u_filtered, v_filtered
         
-        # 进度打印
-        if n % print_freq == 0 or n == nt - 1:
-            progress = 100.0 * n / nt
-            elapsed = time.time() - start
-            if n > 0:
-                eta = elapsed / n * (nt - n)
-                print(f"[{n:8d}/{nt}] ({progress:5.1f}%) t={t:.3e}s, 已用时={elapsed:.1f}s, 预计剩余={eta:.1f}s", 
-                      file=sys.stderr)
+        # 计算残差（用于监控）
+        residuals = compute_residuals(p_old, u_old, v_old, p_new, u_new, v_new)
         
-        # 周期性输出VTK
-        if n % output_freq == 0 or n == nt - 1:
-            idx = n // output_freq
-            fname = f"{output_dir}/acoustic_ogrid_{idx:04d}.vtk"
-            
-            # 将单元中心数据插值到节点（用于可视化）
-            # 简单方法：使用相邻单元的平均值
-            p_nodes = np.zeros(n_nodes)
-            u_nodes = np.zeros(n_nodes)
-            v_nodes = np.zeros(n_nodes)
-            node_cell_count = np.zeros(n_nodes)
-            
-            for i, cell in enumerate(cells):
-                for node_idx in cell:
-                    p_nodes[node_idx] += p[i]
-                    u_nodes[node_idx] += u[i]
-                    v_nodes[node_idx] += v[i]
-                    node_cell_count[node_idx] += 1
-            
-            # 平均
-            valid_nodes = node_cell_count > 0
-            p_nodes[valid_nodes] /= node_cell_count[valid_nodes]
-            u_nodes[valid_nodes] /= node_cell_count[valid_nodes]
-            v_nodes[valid_nodes] /= node_cell_count[valid_nodes]
-            
-            # 计算速度大小
-            velocity_magnitude_nodes = np.sqrt(u_nodes**2 + v_nodes**2)
-            
-            # 输出VTK（非结构化网格）
-            mesh = meshio.Mesh(
-                points=nodes,
-                cells=[("quad", cells)],
-                point_data={
-                    "pressure": p_nodes,
-                    "velocity_u": u_nodes,
-                    "velocity_v": v_nodes,
-                    "velocity_magnitude": velocity_magnitude_nodes
-                },
-                cell_data={
-                    "pressure": [p],
-                    "velocity_u": [u],
-                    "velocity_v": [v],
-                    "velocity_magnitude": [np.sqrt(u**2 + v**2)]
-                }
-            )
-            meshio.write(fname, mesh)
-            
-            # 计算统计信息
-            p_valid = p[p != 0]  # 简化：排除零值
+        # 更新场变量
+        p, u, v = p_new, u_new, v_new
+        p_old, u_old, v_old = p.copy(), u.copy(), v.copy()
+        
+        # 基于时间的日志输出
+        if t >= next_log_time or n == nt - 1:
+            # 计算压力统计
+            p_valid = p[p != 0] if len(p) > 0 else p
             if len(p_valid) > 0:
-                print(f"[{n}/{nt}] 数据已保存到 {fname}", file=sys.stderr)
-                print(f"  压力统计: min={np.min(p_valid):.3e}, max={np.max(p_valid):.3e}, "
-                      f"mean={np.mean(p_valid):.3e} Pa", file=sys.stderr)
+                p_min = np.min(p_valid)
+                p_max = np.max(p_valid)
+                p_mean = np.mean(p_valid)
+            else:
+                p_min = p_max = p_mean = 0.0
+            
+            # 写入日志
+            write_log_entry(log_file_path, n, t, dt, residuals, p, u, v,
+                           p_min, p_max, p_mean)
+            
+            # 更新下次日志输出时间
+            next_log_time = ((int(t / log_time_interval) + 1) * log_time_interval)
+        
+        # 基于时间的VTK输出
+        if t >= next_output_time or n == nt - 1:
+            fname = write_vtk_output(nodes, cells, p, u, v, output_dir, output_idx)
+            
+            # 更新下次输出时间
+            next_output_time = ((int(t / output_time_interval) + 1) * output_time_interval)
+            output_idx += 1
+        
+        # 进度条显示（每次迭代都更新，但只在stderr输出）
+        progress = 100.0 * (n + 1) / nt
+        elapsed = time.time() - start
+        if n > 0:
+            eta = elapsed / (n + 1) * (nt - n - 1)
+        else:
+            eta = 0.0
+        
+        # 使用进度条格式
+        progress_str = update_progress_bar(progress, progress_bar_width, elapsed, eta)
+        print(progress_str, end='', file=sys.stderr, flush=True)
+        
+        # 在最后一步或特定时间点换行并输出详细信息
+        if n == nt - 1 or (n > 0 and n % max(1, nt // 100) == 0):
+            print("", file=sys.stderr)  # 换行
+            if n == nt - 1:
+                print(f"完成: t={t:.6e}s, 总残差={residuals['total']:.6e}", file=sys.stderr)
     
     end = time.time()
-    print(f"Simulation complete in {end-start:.1f}s", file=sys.stderr)
+    print(f"\n模拟完成！总用时: {end-start:.1f}s", file=sys.stderr)
+    print(f"日志文件已保存到: {log_file_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
