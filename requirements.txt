@@ -1,0 +1,17 @@
+# RDE声学模拟项目依赖
+# 安装方法: pip install -r requirements.txt
+# 或使用虚拟环境: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+# 核心数值计算库
+numpy>=1.20.0
+
+# 网格处理库（用于生成和读写VTK文件）
+meshio>=5.0.0
+
+# 可视化库（用于signal_acoustic_1D.py和signal_acoustic_2D.py）
+matplotlib>=3.3.0
+
+# 注意：
+# - argparse, multiprocessing, functools, os, sys, time 是Python标准库，无需安装
+# - 如果只需要运行plane_2D.py和mesh.py，可以只安装numpy和meshio
+# - 如果需要运行可视化脚本，需要安装matplotlib
