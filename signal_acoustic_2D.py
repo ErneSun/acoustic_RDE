@@ -6,14 +6,14 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 # 参数设置
-R = 0.005  # 管道半径 5mm
+R = 0.01  # 管道半径 [m] (与plane_2D.py保持一致)
 L = 2 * np.pi * R  # 周长 = 2πR
-H = 0.01  # 管道高度 10mm
-diameter = 0.01  # 管道直径 10mm
-v_rde = 1400  # 爆轰波速度 1400 m/s
-wave_height = 0.002  #爆轰波高度 2mm
-wave_pressure = 10  # 爆轰波最大压强10atm
-tilt_angle = 10  # 前倾角度 70度
+H = 0.01  # 管道高度 [m]
+diameter = 2 * R  # 管道直径 [m]
+v_rde = 1400  # 爆轰波速度 [m/s]
+wave_height = 0.002  # 爆轰波高度 [m]
+wave_pressure = 10.0  # 爆轰波最大压强 [Pa] (注意：10 Pa，不是10 atm)
+tilt_angle = 10  # 前倾角度 [度]
 tilt_rad = np.radians(tilt_angle)  # 转换为弧度
 x_N_points = 1000  # 网格点数
 y_N_points = 500

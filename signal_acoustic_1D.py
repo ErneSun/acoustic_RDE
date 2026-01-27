@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 # 周向参数
-L = 2 * np.pi * 0.005  # 周长 = 2πR，R = 5mm
+R = 0.01  # 管道半径 [m] (与plane_2D.py保持一致)
+L = 2 * np.pi * R  # 周长 = 2πR
 N_points = 1000
 x = np.linspace(0, L, N_points)
 
