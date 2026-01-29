@@ -27,7 +27,7 @@ def control():
     
     # ==================== 几何参数 ====================
     R      = 0.01         # 外半径 [m]
-    r_core = 0.007        # 内半径 [m]
+    r_core = 0.003        # 内半径 [m]
     dr     = 0.0002       # 径向网格间距 [m]
     
     # ==================== 时间参数 ====================
@@ -44,9 +44,11 @@ def control():
     # 内半径不能小于 r_core，避免跨越内壁
     inner_r  = max(R - detonation_width, r_core)   # 环带内半径 [m]
     outer_r  = R                                   # 环带外半径 [m]（始终贴在外壁）
-    omega    = v_rde / R      # 角速度 [rad/s]
+    omega    = v_rde / R      # 角速度 [rad/s]（逆时针为正）
     sigma    = 0.001          # 衰减尺度 [m]
     tau = 2 * np.pi * R / v_rde  # 特征时间 [s]
+    # 爆轰波旋转方向：True=顺时针，False=逆时针（与角速度符号一致）
+    rotation_clockwise = False   # 默认逆时针
 
     # 源项 DC（体积平均）修正参数
     # 在封闭硬壁腔体中，旋转源项可能带有非零体积平均（DC 分量），会导致平均压力随时间非物理漂移。
@@ -78,20 +80,12 @@ def control():
     log_file = "simulation_log.txt"       # 日志文件名（保存在output_dir中）
     progress_bar_width = 50               # 进度条宽度（字符数）
     
-    # ==================== 性能优化说明 ====================
-    # 注意：代码已优化，不再使用multiprocessing并行计算
-    # 性能优化通过以下方式实现：
-    # 1. 预计算几何量（边向量、法向量、长度等）- 避免重复计算
-    # 2. 预计算边-邻居映射（避免运行时查找）- 大幅提升邻居查找速度
-    # 3. 向量化操作（numpy数组操作）- 替代Python循环
-    # 4. 直接计算拉普拉斯（避免双重计算梯度+散度）
-    # 
-    # 对于小到中等规模网格（<50000单元），优化后的串行计算已经足够快
-    # 预期性能提升：10-20倍（相比优化前）
-    #
-    # 以下参数保留以兼容旧代码，但不再使用：
-    use_parallel_default = False   # （已弃用）不再使用multiprocessing
-    n_cores_default = 1        # （已弃用）不再使用multiprocessing
+    # ==================== 并行计算参数 ====================
+    # 网格数 > parallel_min_cells 时程序会提示建议启用并行；是否启用由 use_parallel 或命令行 -n N 决定
+    # 命令行 -n N 指定线程数即启用并行；--single 强制单核
+    use_parallel = True              # 是否允许多核并行（False 时仅单核，除非命令行指定 -n N）
+    parallel_min_cells = 50000       # 超过此网格数时提示“建议启用并行”；且 use_parallel=True 时自动开并行
+    n_cores = None                   # 并行线程数（仅当 use_parallel 且未用 -n 时生效），None 表示自动取 CPU 核心数
     
     # ==================== 网格生成参数 ====================
     # 角度间距计算方式：dtheta = 0.0002 / R
@@ -123,6 +117,7 @@ def control():
         'omega': omega,
         'sigma': sigma,
         'tau': tau,
+        'rotation_clockwise': rotation_clockwise,
         'zero_mean_source': zero_mean_source,
         'zero_mean_mode': zero_mean_mode,
         
@@ -141,8 +136,9 @@ def control():
         'progress_bar_width': progress_bar_width,
         
         # 并行计算参数
-        'use_parallel_default': use_parallel_default,
-        'n_cores_default': n_cores_default,
+        'use_parallel': use_parallel,
+        'parallel_min_cells': parallel_min_cells,
+        'n_cores': n_cores,
         
         # 网格生成参数
         'dtheta_base': dtheta_base,
@@ -186,6 +182,7 @@ def validate_params(params):
         'omega': '角速度 [rad/s]',
         'sigma': '衰减尺度 [m]',
         'tau': '特征时间 [s]',
+        'rotation_clockwise': '爆轰波旋转方向（True=顺时针，False=逆时针）',
         'zero_mean_source': '是否对源项进行体积零均值（DC）修正',
         'zero_mean_mode': '源项零均值修正模式（\"stage\" / \"step\" / \"off\"）',
         # 数值计算参数
@@ -200,9 +197,10 @@ def validate_params(params):
         'log_time_interval': '日志输出时间间隔 [s]',
         'log_file': '日志文件名',
         'progress_bar_width': '进度条宽度',
-        # 性能优化参数（已弃用，保留以兼容）
-        'use_parallel_default': '（已弃用）不再使用multiprocessing并行计算',
-        'n_cores_default': '（已弃用）不再使用multiprocessing并行计算',
+        # 并行计算参数
+        'use_parallel': '是否允许多核并行',
+        'parallel_min_cells': '启用并行的网格数阈值',
+        'n_cores': '并行线程数（None=自动）',
         # 网格生成参数
         'dtheta_base': '角度间距基准值 [m]',
     }
@@ -218,7 +216,10 @@ def validate_params(params):
             # 检查参数值是否有效（不是None，且对于数值参数，应该是数字）
             value = params[param]
             if value is None:
-                invalid_params.append((param, description, "值为None"))
+                if param == 'n_cores':
+                    pass  # n_cores 允许为 None（表示自动检测核心数）
+                else:
+                    invalid_params.append((param, description, "值为None"))
             elif param in ['rho0', 'c0', 'nu', 'R', 'r_core', 'dr', 'dt', 't_end', 
                           'wave_pressure', 'v_rde', 'detonation_width',
                           'inner_r', 'outer_r', 'omega', 
@@ -239,10 +240,28 @@ def validate_params(params):
                     invalid_params.append((param, description, f"值不是有效数字，当前值: {value}"))
             elif param == 'apply_filter' and not isinstance(value, bool):
                 invalid_params.append((param, description, f"值必须是布尔类型，当前值: {value}"))
+            elif param == 'rotation_clockwise' and not isinstance(value, bool):
+                invalid_params.append((param, description, f"值必须是布尔类型，当前值: {value}"))
             elif param == 'zero_mean_source' and not isinstance(value, bool):
                 invalid_params.append((param, description, f"值必须是布尔类型，当前值: {value}"))
             elif param in ['output_dir', 'log_file'] and not isinstance(value, str):
                 invalid_params.append((param, description, f"值必须是字符串，当前值: {value}"))
+            elif param == 'use_parallel' and not isinstance(value, bool):
+                invalid_params.append((param, description, f"值必须是布尔类型，当前值: {value}"))
+            elif param == 'parallel_min_cells':
+                try:
+                    v = int(value)
+                    if v <= 0:
+                        invalid_params.append((param, description, f"值必须为正整数，当前值: {value}"))
+                except (TypeError, ValueError):
+                    invalid_params.append((param, description, f"值必须是正整数，当前值: {value}"))
+            elif param == 'n_cores' and value is not None:
+                try:
+                    v = int(value)
+                    if v <= 0:
+                        invalid_params.append((param, description, f"值必须为正整数或 None，当前值: {value}"))
+                except (TypeError, ValueError):
+                    invalid_params.append((param, description, f"值必须是正整数或 None，当前值: {value}"))
             elif param == 'zero_mean_mode':
                 if not isinstance(value, str):
                     invalid_params.append((param, description, f"值必须是字符串，当前值: {value}"))
@@ -281,6 +300,7 @@ if __name__ == "__main__":
     print(f"  角速度 (omega): {params['omega']} rad/s")
     print(f"  衰减尺度 (sigma): {params['sigma']} m")
     print(f"  特征时间 (tau): {params['tau']} s")
+    print(f"  爆轰波旋转方向: {'顺时针' if params['rotation_clockwise'] else '逆时针'}")
     print(f"  源项零均值修正: {params['zero_mean_source']} (模式: {params['zero_mean_mode']})")
     
     print("\n数值计算参数:")
@@ -296,10 +316,10 @@ if __name__ == "__main__":
     print(f"  日志文件名: {params['log_file']}")
     print(f"  进度条宽度: {params['progress_bar_width']} 字符")
     
-    print("\n性能优化:")
-    print(f"  代码已优化，不再使用multiprocessing并行计算")
-    print(f"  性能优化通过预计算和向量化实现")
-    print(f"  预期性能提升: 10-20倍")
-    print(f"  适用规模: <50000单元（小到中等规模网格）")
+    print("\n并行与性能:")
+    print(f"  是否启用多核并行: {params['use_parallel']}")
+    print(f"  并行网格数阈值: {params['parallel_min_cells']} 单元")
+    print(f"  并行线程数: {params['n_cores'] if params['n_cores'] is not None else '自动'}")
+    print(f"  单核时性能与未开并行时完全一致")
     
     print("\n" + "=" * 60)

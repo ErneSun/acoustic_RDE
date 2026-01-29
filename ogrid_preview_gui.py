@@ -6,6 +6,7 @@ RDE O网格模拟 - 初始化预览 GUI
 
 import sys
 import os
+import time
 
 # 确保项目根目录在 path 中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,6 +30,7 @@ from plane_2D_Ogrid import (
     identify_boundary_cells,
     rk4_step_ogrid,
 )
+from plane_2D_Ogrid_mesh import load_ogrid_mesh, mesh_params_match
 
 
 def run_init_and_one_step():
@@ -57,6 +59,7 @@ def run_init_and_one_step():
     r_core = params['r_core']
     dr = params['dr']
     dtheta_base = params['dtheta_base']
+    output_dir = params['output_dir']
     boundary_tolerance = params['boundary_tolerance']
     rho0 = params['rho0']
     c0 = params['c0']
@@ -71,10 +74,16 @@ def run_init_and_one_step():
     zero_mean_source = params['zero_mean_source']
     zero_mean_mode = params['zero_mean_mode']
 
-    # 生成网格与预计算几何量
-    (nodes, cells, cell_centers, cell_areas, cell_neighbors, nr, ntheta,
-     edge_normals, edge_lengths, edge_neighbors, edge_count) = generate_ogrid_mesh(
-        R, r_core, dr, dtheta_base)
+    # 网格：参数与已保存文件一致则加载，否则重新生成（不在此处保存，主模拟运行时会保存）
+    loaded_params, loaded_mesh = load_ogrid_mesh(output_dir)
+    if (loaded_params is not None and loaded_mesh is not None
+            and mesh_params_match(R, r_core, dr, dtheta_base, *loaded_params)):
+        (nodes, cells, cell_centers, cell_areas, cell_neighbors, nr, ntheta,
+         edge_normals, edge_lengths, edge_neighbors, edge_count) = loaded_mesh
+    else:
+        (nodes, cells, cell_centers, cell_areas, cell_neighbors, nr, ntheta,
+         edge_normals, edge_lengths, edge_neighbors, edge_count) = generate_ogrid_mesh(
+            R, r_core, dr, dtheta_base)
     n_cells = len(cells)
     max_edges = edge_normals.shape[1]
 
@@ -145,6 +154,7 @@ def build_preview_window(nodes, cells, cell_centers, p_init, params):
     canvas = FigureCanvasTkAgg(fig, master=left_frame)
     canvas.draw()
     canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    root._fig = fig  # 保存引用，关闭时释放 matplotlib 资源，避免退出时报错
 
     # 右侧：按钮
     right_frame = ttk.Frame(root, padding=15)
@@ -152,15 +162,19 @@ def build_preview_window(nodes, cells, cell_centers, p_init, params):
 
     ttk.Label(right_frame, text="Initialization Check", font=('', 12, 'bold')).pack(pady=(0, 15))
 
-    def on_continue():
-        user_continue.set(True)
-        root.destroy()  # 先关闭窗口，再退出主循环
+    def _close_window(continue_ok):
+        user_continue.set(continue_ok)
+        root.withdraw()   # 立即隐藏窗口，用户不再看到
+        if hasattr(root, '_fig'):
+            plt.close(root._fig)  # 先关闭图形，避免退出时触发错误报告
         root.quit()
+        root.destroy()
+
+    def on_continue():
+        _close_window(True)
 
     def on_break():
-        user_continue.set(False)
-        root.destroy()
-        root.quit()
+        _close_window(False)
 
     btn_continue = ttk.Button(right_frame, text="Continue", command=on_continue, width=14)
     btn_continue.pack(pady=10)
@@ -192,7 +206,9 @@ def main():
     root.mainloop()
 
     if user_continue.get():
-        print("用户选择继续，启动主模拟...", file=sys.stderr)
+        print("用户选择继续，等待窗口关闭...", file=sys.stderr)
+        time.sleep(1.5)  # 留 1.5 秒让系统完成关闭窗口后再执行主模拟
+        print("启动主模拟...", file=sys.stderr)
         from plane_2D_Ogrid import main as run_main
         run_main()
     else:

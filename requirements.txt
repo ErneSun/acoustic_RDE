@@ -1,24 +1,24 @@
 # RDE声学模拟项目依赖
-# 安装方法: pip install -r requirements.txt
-# 或使用虚拟环境: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+# 安装: pip install -r requirements.txt
+# 推荐使用虚拟环境: python -m venv .venv && source .venv/bin/activate (Linux/macOS)
 
-# 核心数值计算库
+# ========== 核心依赖（运行主模拟必需） ==========
+# 数值计算，control.py / plane_2D.py / plane_2D_Ogrid.py / mesh.py 等均需要
 numpy>=1.20.0
 
-# 网格处理库（用于生成和读写VTK文件）
-# mesh.py和plane_2D_Ogrid.py需要
+# 网格与 VTK 读写，mesh.py、plane_2D_Ogrid.py 输出 VTK 必需
 meshio>=5.0.0
 
-# 可视化库（用于signal_acoustic_1D.py和signal_acoustic_2D.py）
-# 如果只需要运行模拟代码，可以不安装
+# ========== 可选依赖（强烈推荐） ==========
+# plane_2D_Ogrid.py 的 FVM 算子、源项、滤波均可用 Numba JIT 加速；未安装时退化为纯 numpy（较慢）
+# 安装后还可使用多线程并行（prange），网格数大时建议安装
+numba>=0.56.0
+
+# ========== 可选依赖（仅可视化脚本需要） ==========
+# signal_acoustic_1D.py、signal_acoustic_2D.py、ogrid_preview_gui.py 需要
+# 若只运行 plane_2D.py / plane_2D_Ogrid.py / mesh.py，可不安装
 matplotlib>=3.3.0
 
-# 可选：性能加速库（plane_2D_Ogrid.py中可选使用）
-# 如果未安装，代码会自动使用纯numpy实现
-# numba>=0.56.0
-
-# 注意：
-# - argparse, multiprocessing, functools, os, sys, time, gc 是Python标准库，无需安装
-# - 如果只需要运行plane_2D.py和mesh.py，可以只安装numpy和meshio
-# - 如果需要运行可视化脚本（signal_acoustic_*.py），需要安装matplotlib
-# - numba是可选的，安装后可以进一步提升plane_2D_Ogrid.py的性能
+# ---------- 说明 ----------
+# 标准库（无需 pip 安装）: os, sys, time, argparse, multiprocessing, functools, gc
+# ogrid_preview_gui.py 使用 tkinter，通常随 Python 安装；若缺失请参考 README_INSTALL.md

@@ -1,14 +1,13 @@
-# RDE声学模拟项目 - 安装指南
+# RDE 声学模拟项目 - 安装与运行指南
 
 ## 快速开始
 
 ### 1. 创建虚拟环境（推荐）
 
 ```bash
-# 创建虚拟环境
 python3 -m venv .venv
 
-# 激活虚拟环境
+# 激活
 # macOS/Linux:
 source .venv/bin/activate
 # Windows:
@@ -18,149 +17,171 @@ source .venv/bin/activate
 ### 2. 安装依赖
 
 ```bash
-# 使用pip安装所有依赖
 pip install -r requirements.txt
-
-# 或者手动安装
-pip install numpy>=1.20.0 meshio>=5.0.0 matplotlib>=3.3.0
 ```
 
 ### 3. 验证安装
 
 ```bash
-# 测试导入
-python -c "import numpy; import meshio; import matplotlib; print('所有依赖安装成功！')"
+python -c "import numpy; import meshio; print('核心依赖 OK')"
+python -c "import numba; print('numba OK')"   # 可选
+python -c "import matplotlib; print('matplotlib OK')"  # 可选
 ```
+
+---
 
 ## 依赖说明
 
-### 必需依赖（核心模拟）
+### 核心依赖（主模拟必需）
 
-- **numpy**: 数值计算库，用于所有数值运算
-- **meshio**: 网格处理库，用于生成和读写VTK格式的网格文件
+- **numpy** (>=1.20.0)：数值计算，`control.py`、`plane_2D.py`、`plane_2D_Ogrid*.py`、`mesh.py` 等均需要。
+- **meshio** (>=5.0.0)：VTK 读写，`plane_2D_Ogrid` 输出 VTK 必需。
 
-### 可选依赖（可视化）
+### 可选依赖（强烈推荐）
 
-- **matplotlib**: 用于 `signal_acoustic_1D.py` 和 `signal_acoustic_2D.py` 的可视化脚本
+- **numba** (>=0.56.0)：O 网格 FVM/源项/滤波 JIT 加速及多线程（prange）；未安装时退化为纯 numpy，计算较慢。
 
-### 可选依赖（性能优化）
+### 可选依赖（仅可视化与预览）
 
-- **numba**: 为 `plane_2D_Ogrid.py` 中的有限体积算子、源项和滤波提供JIT加速，进一步提升单核性能（推荐安装）
+- **matplotlib** (>=3.3.0)：`signal_acoustic_1D.py`、`signal_acoustic_2D.py`、`ogrid_preview_gui.py` 需要；若只跑主模拟可不装。
+- **tkinter**：`ogrid_preview_gui.py`、`main_ogrid.py` 需要，通常随 Python 安装；若缺失见下方“故障排除”。
 
-### Python标准库（无需安装）
+---
 
-以下库是Python标准库，无需额外安装：
-- `os`, `sys`, `time`: 系统操作
-- `argparse`: 命令行参数解析
-- `multiprocessing`: 并行计算
-- `functools`: 函数工具
+## 运行说明
 
-## 使用说明
+### 推荐：先预览再主模拟（统一入口）
 
-### 运行主模拟程序
+```bash
+python main_ogrid.py
+```
+
+流程：初始化/加载网格 → 弹窗显示 1 步后压力分布 → 点 **Continue** 后约 1.5 秒关闭窗口并启动主模拟；点 **Break** 或关窗则退出。
+
+### 仅主模拟（跳过 GUI）
+
+```bash
+# 按 control.py 设置运行（单核/多核由 use_parallel 与网格数决定）
+python plane_2D_Ogrid.py
+
+# 指定 8 线程
+python plane_2D_Ogrid.py -n 8
+
+# 强制单核
+python plane_2D_Ogrid.py --single
+```
+
+### 仅预览（不跑主模拟）
+
+```bash
+python ogrid_preview_gui.py
+```
+
+### 其他程序
 
 ```bash
 # 结构化网格版本
 python plane_2D.py
 
-# 非结构化O网格版本（高性能优化版本）
-python plane_2D_Ogrid.py
-# 注意：命令行参数 -n 和 --single 已弃用
-# 性能优化通过预计算和向量化实现，不再使用multiprocessing
-# 预期性能提升：10-20倍（对于4000网格，从2-3秒/步降至0.1-0.3秒/步）
-```
-
-### 配置模拟参数
-
-所有模拟参数统一在 `control.py` 文件中管理：
-
-```bash
-# 查看参数配置（会打印所有参数）
-python control.py
-
-# 修改参数：直接编辑 control.py 文件
-# 然后运行主程序即可
-python plane_2D_Ogrid.py
-```
-
-**参数类型**：
-- 物理参数（密度、声速、黏度）
-- 几何参数（内外半径、网格间距）
-- 时间参数（时间步长、结束时间）
-- 声源参数（爆轰波参数）
-- 数值计算参数（滤波、CFL数等）
-- 输出参数（输出目录、时间间隔、日志文件等）
-
-**输出功能**：
-- **进度条显示**：实时显示计算进度（百分比），包括已用时间和预计剩余时间
-- **日志文件**：自动记录到 `output_ogrid/simulation_log.txt`，包含：
-  - 时间步数和当前时间
-  - 压力、速度残差
-  - 压力统计（最小值、最大值）
-  - 压力体积加权平均值 `p_mean_vol(t)` 与体积加权 RMS `p_rms_vol(t)`
-- **源项 DC 诊断文件**：`output_ogrid/source_dc_diagnostics.csv`，记录每步源项 DC 相关统计量，便于检查平均压力漂移是否被抑制
-- **VTK输出**：基于时间间隔输出，更加直观（由 `output_time_interval` 控制）
-- **日志输出**：基于时间间隔输出（由 `log_time_interval` 控制）
-
-**性能优化**：
-- 代码已进行重大性能优化，通过预计算和向量化实现
-- 不再使用multiprocessing并行计算（对小规模网格开销过大）
-- 预期性能提升：10-20倍
-- 对于4000个网格，每个时间步从2-3秒降至0.1-0.3秒
-
-### 生成网格
-
-```bash
+# 独立网格生成（输出 mesh/o_cut_annulus.vtk）
 python mesh.py
-```
 
-### 运行可视化脚本
-
-```bash
-# 1D可视化
+# 1D/2D 可视化
 python signal_acoustic_1D.py
-
-# 2D可视化
 python signal_acoustic_2D.py
 ```
 
+---
+
+## 网格缓存
+
+- **文件**：`output_ogrid/ogrid_mesh.npz`（由 `control.py` 中 `output_dir` 决定）。
+- **逻辑**：
+  - 首次运行或文件不存在：生成网格，主模拟结束后**保存**。
+  - 再次运行且 `R`、`r_core`、`dr`、`dtheta_base` 与文件中一致：**直接加载**，不重新生成。
+  - 任一参数不一致：**重新生成**并**覆盖**该文件。
+- 预览 GUI 使用同一套加载/生成逻辑，但**不会写入**网格文件。
+
+---
+
+## 配置参数
+
+所有模拟参数在 `control.py` 的 `control()` 中定义，并由 `validate_params(params)` 校验。
+
+```bash
+# 查看当前参数
+python control.py
+```
+
+修改参数：编辑 `control.py` 中 `control()` 的赋值，然后运行主程序或 `main_ogrid.py`。
+
+---
+
+## 输出与日志
+
+- **VTK**：`output_ogrid/acoustic_ogrid_XXXX.vtk`（按 `output_time_interval` 输出）。
+- **仿真日志**：`output_ogrid/simulation_log.txt`（时间步、残差、压力统计、p_mean_vol、p_rms_vol 等）。
+- **源项 DC 诊断**：`output_ogrid/source_dc_diagnostics.csv`。
+- **网格缓存**：`output_ogrid/ogrid_mesh.npz`。
+
+---
+
 ## 系统要求
 
-- Python 3.7 或更高版本
-- 推荐使用虚拟环境以避免依赖冲突
+- Python 3.7 及以上。
+- 推荐使用虚拟环境以避免依赖冲突。
+
+---
 
 ## 故障排除
 
-### 问题：找不到meshio模块
+### 找不到 `meshio`
 
 ```bash
 pip install meshio
 ```
 
-### 问题：matplotlib显示问题（macOS）
+### 找不到 `_tkinter`（运行 main_ogrid.py 或 ogrid_preview_gui.py 报错）
 
-如果使用macOS且matplotlib无法显示窗口，可能需要安装tkinter：
+Python 未带 Tk 支持时会出现。可任选其一：
+
+- **Homebrew (macOS)**：
+  ```bash
+  brew install python-tk@3.13
+  # 或先装 Tcl/Tk 再重装 Python
+  brew install tcl-tk
+  brew reinstall python@3.13
+  ```
+- **Conda**：`conda install tk`
+
+若暂时不用 GUI，可直接运行主模拟：
 
 ```bash
-# macOS (使用Homebrew)
-brew install python-tk
-
-# 或使用conda
-conda install tk
+python plane_2D_Ogrid.py
 ```
 
-### 问题：性能仍然较慢
+### 计算很慢
 
-如果计算仍然较慢，请检查：
-1. 网格数量是否过大（>50000单元可能需要进一步优化）
-2. 时间步长是否过小（检查CFL数）
-3. 输出频率是否过高（减少`output_time_interval`和`log_time_interval`）
-4. 是否已安装 `numba`（推荐：`pip install numba`，可显著提升非结构化O网格版本性能）
+1. 确认已安装 `numba`：`pip install numba`。
+2. 网格数较大（如 >50000）时，可启用多线程：`python plane_2D_Ogrid.py -n 8` 或在 `control.py` 中设 `use_parallel=True`。
+3. 适当增大 `output_time_interval`、`log_time_interval` 以减少 I/O。
 
-**注意**：代码已优化，不再使用multiprocessing。性能优化通过预计算、向量化和Numba JIT实现。
+### 参数校验失败
+
+运行时会从 `control.py` 读取参数并校验。若报“参数验证失败”，请根据终端提示检查 `control.py` 中是否缺少或填错参数（如 None、非正数等）。可用 `python control.py` 查看当前参数。
+
+### 网格检查失败
+
+主程序会在获得网格后做一致性检查。若报“网格检查失败”，程序会打印具体错误并退出，请根据提示排查（如节点/单元数、面积、边与邻居等）。
+
+---
 
 ## 更新依赖
 
 ```bash
 pip install --upgrade -r requirements.txt
 ```
+
+---
+
+**注意**：本代码库用于学术研究，使用前请阅读 [LICENSE](LICENSE)。
