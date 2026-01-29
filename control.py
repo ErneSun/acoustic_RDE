@@ -47,6 +47,15 @@ def control():
     omega    = v_rde / R      # 角速度 [rad/s]
     sigma    = 0.001          # 衰减尺度 [m]
     tau = 2 * np.pi * R / v_rde  # 特征时间 [s]
+
+    # 源项 DC（体积平均）修正参数
+    # 在封闭硬壁腔体中，旋转源项可能带有非零体积平均（DC 分量），会导致平均压力随时间非物理漂移。
+    # zero_mean_source=True 时，将对源项的体积平均分量执行零均值修正：
+    #   - 模式 "stage"：在 RK4 的每个 stage 内部对 RHS 源项 S 做零均值处理（物理上最干净，推荐）
+    #   - 模式 "step" ：每个时间步结束后，根据本步源项的体积平均 DC 量，对压力场做一次整体常数平移，近似移除本步的 DC 贡献
+    #   - 模式 "off"  ：完全不做 DC 修正，用于对比/回归
+    zero_mean_source = True          # 是否移除源项的体积平均（DC 分量）
+    zero_mean_mode = "off"         # 修正模式："stage" / "step" / "off"
     
     # ==================== 数值计算参数 ====================
     # 数值滤波参数
@@ -114,6 +123,8 @@ def control():
         'omega': omega,
         'sigma': sigma,
         'tau': tau,
+        'zero_mean_source': zero_mean_source,
+        'zero_mean_mode': zero_mean_mode,
         
         # 数值计算参数
         'filter_strength': filter_strength,
@@ -175,6 +186,8 @@ def validate_params(params):
         'omega': '角速度 [rad/s]',
         'sigma': '衰减尺度 [m]',
         'tau': '特征时间 [s]',
+        'zero_mean_source': '是否对源项进行体积零均值（DC）修正',
+        'zero_mean_mode': '源项零均值修正模式（\"stage\" / \"step\" / \"off\"）',
         # 数值计算参数
         'filter_strength': '滤波强度',
         'apply_filter': '是否应用数值滤波',
@@ -226,8 +239,15 @@ def validate_params(params):
                     invalid_params.append((param, description, f"值不是有效数字，当前值: {value}"))
             elif param == 'apply_filter' and not isinstance(value, bool):
                 invalid_params.append((param, description, f"值必须是布尔类型，当前值: {value}"))
+            elif param == 'zero_mean_source' and not isinstance(value, bool):
+                invalid_params.append((param, description, f"值必须是布尔类型，当前值: {value}"))
             elif param in ['output_dir', 'log_file'] and not isinstance(value, str):
                 invalid_params.append((param, description, f"值必须是字符串，当前值: {value}"))
+            elif param == 'zero_mean_mode':
+                if not isinstance(value, str):
+                    invalid_params.append((param, description, f"值必须是字符串，当前值: {value}"))
+                elif value not in ['stage', 'step', 'off']:
+                    invalid_params.append((param, description, f"取值必须为 'stage'、'step' 或 'off'，当前值: {value}"))
     
     is_valid = len(missing_params) == 0 and len(invalid_params) == 0
     return is_valid, missing_params, invalid_params
@@ -261,6 +281,7 @@ if __name__ == "__main__":
     print(f"  角速度 (omega): {params['omega']} rad/s")
     print(f"  衰减尺度 (sigma): {params['sigma']} m")
     print(f"  特征时间 (tau): {params['tau']} s")
+    print(f"  源项零均值修正: {params['zero_mean_source']} (模式: {params['zero_mean_mode']})")
     
     print("\n数值计算参数:")
     print(f"  滤波强度: {params['filter_strength']}")

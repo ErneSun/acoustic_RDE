@@ -39,18 +39,18 @@ def run_init_and_one_step():
     try:
         params = control()
     except Exception as e:
-        print(f"错误：无法从 control 获取参数: {e}", file=sys.stderr)
+        print(f"Error: cannot get parameters from control: {e}", file=sys.stderr)
         return None
 
     is_valid, missing_params, invalid_params = validate_params(params)
     if not is_valid:
-        print("错误：参数验证失败", file=sys.stderr)
+        print("Error: parameter validation failed", file=sys.stderr)
         if missing_params:
             for p, d in missing_params:
-                print(f"  缺少: {p} - {d}", file=sys.stderr)
+                print(f"  missing: {p} - {d}", file=sys.stderr)
         if invalid_params:
             for p, d, r in invalid_params:
-                print(f"  无效: {p} - {d} - {r}", file=sys.stderr)
+                print(f"  invalid: {p} - {d} - {r}", file=sys.stderr)
         return None
 
     R = params['R']
@@ -68,6 +68,8 @@ def run_init_and_one_step():
     wave_pressure = params['wave_pressure']
     tau = params['tau']
     sigma = params['sigma']
+    zero_mean_source = params['zero_mean_source']
+    zero_mean_mode = params['zero_mean_mode']
 
     # 生成网格与预计算几何量
     (nodes, cells, cell_centers, cell_areas, cell_neighbors, nr, ntheta,
@@ -84,6 +86,9 @@ def run_init_and_one_step():
         if i < n_cells and j < max_edges:
             boundary_mask[i, j] = True
 
+    # 预计算单元面积总和（与 plane_2D_Ogrid 主程序一致，用于源项 DC 修正）
+    cell_areas_sum = float(np.sum(cell_areas))
+
     # 初始场与一个时间步
     p = np.zeros(n_cells)
     u = np.zeros(n_cells)
@@ -93,14 +98,15 @@ def run_init_and_one_step():
     v_new = np.zeros(n_cells)
     t0 = 0.0
 
-    p_new, u_new, v_new, _ = rk4_step_ogrid(
-        p, u, v, t0, dt, cell_centers, cell_areas,
+    p_new, u_new, v_new, _, _ = rk4_step_ogrid(
+        p, u, v, t0, dt, cell_centers, cell_areas, cell_areas_sum,
         inner_wall_cells, outer_wall_cells, wall_normals,
         boundary_mask, edge_normals, edge_lengths,
         edge_neighbors, edge_count,
         rho0, c0, nu,
         inner_r, outer_r, omega, wave_pressure, tau, sigma, R,
-        p_new, u_new, v_new, None)
+        zero_mean_source, zero_mean_mode,
+        p_new, u_new, v_new, None, None)
 
     return (nodes, cells, cell_centers, p_new, params)
 
@@ -111,7 +117,7 @@ def build_preview_window(nodes, cells, cell_centers, p_init, params):
     返回: (root, user_continue: tk.BooleanVar)
     """
     root = tk.Tk()
-    root.title("RDE O网格 - 初始化预览")
+    root.title("RDE O-grid - Initialization Preview")
     root.geometry("900x600")
     root.minsize(700, 450)
 
@@ -132,8 +138,8 @@ def build_preview_window(nodes, cells, cell_centers, p_init, params):
     ax.set_aspect('equal')
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
-    ax.set_title('初始化压力分布 (1 个时间步后) [Pa]')
-    plt.colorbar(ScalarMappable(norm=norm, cmap=sc.get_cmap()), ax=ax, label='p [Pa]')
+    ax.set_title('Initialization Pressure Distribution (1 time step later) [Pa]')
+    plt.colorbar(ScalarMappable(norm=norm, cmap=sc.get_cmap()), ax=ax, label='p [Pa]', shrink=0.4)
     plt.tight_layout()
 
     canvas = FigureCanvasTkAgg(fig, master=left_frame)
@@ -144,21 +150,21 @@ def build_preview_window(nodes, cells, cell_centers, p_init, params):
     right_frame = ttk.Frame(root, padding=15)
     right_frame.pack(side=tk.RIGHT, fill=tk.Y)
 
-    ttk.Label(right_frame, text="初始化检查", font=('', 12, 'bold')).pack(pady=(0, 15))
+    ttk.Label(right_frame, text="Initialization Check", font=('', 12, 'bold')).pack(pady=(0, 15))
 
     def on_continue():
         user_continue.set(True)
+        root.destroy()  # 先关闭窗口，再退出主循环
         root.quit()
-        root.destroy()
 
     def on_break():
         user_continue.set(False)
-        root.quit()
         root.destroy()
+        root.quit()
 
-    btn_continue = ttk.Button(right_frame, text="Continue\n(继续计算)", command=on_continue, width=14)
+    btn_continue = ttk.Button(right_frame, text="Continue", command=on_continue, width=14)
     btn_continue.pack(pady=10)
-    btn_break = ttk.Button(right_frame, text="Break\n(退出程序)", command=on_break, width=14)
+    btn_break = ttk.Button(right_frame, text="Break", command=on_break, width=14)
     btn_break.pack(pady=10)
 
     # 点击窗口关闭按钮视为退出
@@ -167,7 +173,7 @@ def build_preview_window(nodes, cells, cell_centers, p_init, params):
     # 简要参数信息
     R, r_core = params['R'], params['r_core']
     detonation_width = params.get('detonation_width', R - params['inner_r'])
-    info = f"R={R:.4f} m\nr_core={r_core:.4f} m\n爆轰波宽度≈{detonation_width:.4f} m"
+    info = f"R={R:.4f} m\nr_core={r_core:.4f} m\nDetonation Wave Width ≈{detonation_width:.4f} m"
     ttk.Label(right_frame, text=info, justify=tk.LEFT).pack(pady=20, anchor=tk.W)
 
     return root, user_continue

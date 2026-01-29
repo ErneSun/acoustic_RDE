@@ -13,6 +13,7 @@
 - **可视化输出**：生成VTK格式文件，便于ParaView等工具可视化分析
 - **进度条显示**：实时显示计算进度（百分比进度条）
 - **日志记录**：自动记录时间步、残差、压力统计等关键参数到文本文件
+- **源项 DC 零均值修正**：提供 `zero_mean_source` 与 `zero_mean_mode`（`"stage"` / `"step"` / `"off"`）选项，抑制封闭硬壁腔体中的平均压力非物理漂移
 
 ## 代码文件说明
 
@@ -48,8 +49,17 @@
   - 与`plane_2D.py`物理模型一致
   - **参数配置**：通过`control.py`模块统一管理所有参数
   - **进度显示**：实时百分比进度条，显示已用时间和预计剩余时间
-  - **日志记录**：自动记录计算过程的关键参数（时间步、残差、压力统计等）
+  - **日志记录**：自动记录计算过程的关键参数（时间步、残差、压力体积加权平均值与RMS等）
   - **基于时间的输出**：VTK文件和日志输出都基于时间间隔，更加直观
+- **源项 DC 修正与诊断**：
+  - 参数 `zero_mean_source`（布尔）控制是否移除旋转源项的体积平均（DC 分量）
+  - 模式 `zero_mean_mode`：
+    - `"stage"`：在 RK4 的每个 stage 内部对源项 `S` 执行零均值修正（推荐，物理上最干净）
+    - `"step"`：每个时间步结束后依据本步的源项 DC 量，对压力场做一次整体常数平移，近似抵消平均压力漂移
+    - `"off"`：不做任何 DC 修正，用于回归/对比
+  - 诊断输出：
+    - 在 `output_ogrid/simulation_log.txt` 中增加体积加权的 `p_mean_vol(t)` 与 `p_rms_vol(t)`
+    - 在 `output_ogrid/source_dc_diagnostics.csv` 中记录每步源项 DC 统计（`S_mean_raw_stage` 等），便于检查 DC 是否被正确移除
 - **适用场景**：高精度模拟、大规模计算
 - **性能**：对于4000个网格，每个时间步约0.1-0.3秒（优化前为2-3秒）
 - **使用方法**：
@@ -205,8 +215,13 @@ python mesh.py
 - **日志文件**：`output_ogrid/simulation_log.txt`
   - 时间步数和当前时间
   - 压力、速度残差
-  - 压力统计（最小值、最大值、平均值）
-  - 日志输出时间间隔由`log_time_interval`参数控制
+  - 压力统计（最小值、最大值）
+  - 压力体积加权平均值 `p_mean_vol(t)` 与体积加权 RMS `p_rms_vol(t)`（基于单元面积加权）
+  - 日志输出时间间隔由 `log_time_interval` 参数控制
+- **源项 DC 诊断文件**：`output_ogrid/source_dc_diagnostics.csv`
+  - 每个时间步的源项体积均值 `S_mean_raw_stage`
+  - 修正后统计量（取决于 `zero_mean_mode`）
+  - 近似 `Σ(S·V)` 诊断量（用于验证 DC 是否被成功移除）
 
 ### 网格文件
 - **`mesh/o_cut_annulus.vtk`** - 环形网格
@@ -308,6 +323,8 @@ acoustic_RDE/
 - `filter_frequency = 10`：滤波频率（每N步滤波一次）
 - `CFL_max = 0.5`：最大CFL数（用于稳定性检查）
 - `boundary_tolerance`：边界识别容差（自动计算：`1.5 * dr`）
+- `zero_mean_source = True`：是否对旋转源项执行体积零均值（DC）修正
+- `zero_mean_mode = "stage"`：源项零均值修正模式（`"stage"` / `"step"` / `"off"`）
 
 ### 输出参数
 - `output_dir = "output_ogrid"`：输出目录

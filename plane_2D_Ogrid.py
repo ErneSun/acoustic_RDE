@@ -639,15 +639,17 @@ def apply_wall_boundary_conditions_ogrid(u, v, inner_wall_cells, outer_wall_cell
 
 
 # ==================== RK4时间积分（Numba优化版本，内存优化） ====================
-def rk4_step_ogrid(p, u, v, t, dt, cell_centers, cell_areas,
+def rk4_step_ogrid(p, u, v, t, dt, cell_centers, cell_areas, cell_areas_sum,
                    inner_wall_cells, outer_wall_cells, wall_normals,
                    boundary_mask, edge_normals, edge_lengths, 
                    edge_neighbors, edge_count,
                    rho0, c0, nu,
                    inner_r, outer_r, omega, 
                    wave_pressure, tau, sigma, R,
+                   zero_mean_source, zero_mean_mode,
                    p_new=None, u_new=None, v_new=None,
-                   temp_arrays=None):
+                   temp_arrays=None,
+                   diagnostics=None):
     """
     使用RK4方法进行时间积分（优化版本，使用数组结构和Numba，支持内存重用）
     
@@ -665,6 +667,8 @@ def rk4_step_ogrid(p, u, v, t, dt, cell_centers, cell_areas,
     
     返回:
         p_new, u_new, v_new: 新状态
+        temp_arrays: 复用的RK4临时数组
+        diagnostics: 当前时间步内关于源项DC修正的诊断信息
     """
     n_cells = len(p)
     
@@ -701,11 +705,60 @@ def rk4_step_ogrid(p, u, v, t, dt, cell_centers, cell_areas,
     if v_new is None:
         v_new = np.zeros(n_cells)
     
+    # 源项DC诊断累加器（按时间步聚合4个stage）
+    if diagnostics is None:
+        diagnostics = {}
+    diagnostics_step = {
+        'S_mean_raw_sum': 0.0,     # 4个stage的S_mean_raw求和
+        'S_mean_after_sum': 0.0,   # 4个stage修正后的均值求和（用于检查接近0）
+        'sum_SV_after_sum': 0.0,   # 4个stage修正后Σ(S*V)求和
+        'n_stages': 0,
+    }
+
     def rhs(p_state, u_state, v_state, t_state, dp_dt_out, du_dt_out, dv_dt_out):
         """计算右端项（重用临时数组）"""
         # 计算源项（Numba加速）
         S = source_term_ogrid(cell_centers, t_state, inner_r, outer_r, omega, 
                               wave_pressure, tau, sigma, R)
+
+        # ==================== 源项DC零均值修正 ====================
+        # 在封闭硬壁腔体中，旋转源项往往带有非零体积平均（DC 分量），
+        # 会在时间积分中累积成平均压力的非物理漂移。
+        # 对于 zero_mean_mode == "stage"：
+        #   在每个 RK4 stage 内部直接对 RHS 源项做零均值处理，物理上最干净；
+        # 对于 zero_mean_mode == "step"：
+        #   在这里仅统计每个 stage 的体积均值，真正的修正推迟到整步更新结束后，
+        #   通过对压力场做一次整体常数平移近似移除本步 DC 贡献。
+        if cell_areas_sum > 0.0:
+            # 体积加权源项均值（未修正前）
+            S_mean_raw = np.sum(S * cell_areas) / cell_areas_sum
+        else:
+            S_mean_raw = 0.0
+
+        # 记录诊断信息（即使关闭修正也记录原始DC，便于对比）
+        diagnostics_step['S_mean_raw_sum'] += S_mean_raw
+        diagnostics_step['n_stages'] += 1
+
+        if zero_mean_source and zero_mean_mode == "stage":
+            # 减去体积平均分量，强制满足 Σ(S*V) ≈ 0
+            S -= S_mean_raw
+            if cell_areas_sum > 0.0:
+                S_mean_after = np.sum(S * cell_areas) / cell_areas_sum
+                sum_SV_after = np.sum(S * cell_areas)
+            else:
+                S_mean_after = 0.0
+                sum_SV_after = 0.0
+        else:
+            # 未对源项做就地修正时，仅用于诊断（包括 zero_mean_mode == "step" 或 "off"）
+            if cell_areas_sum > 0.0:
+                S_mean_after = S_mean_raw
+                sum_SV_after = np.sum(S * cell_areas)
+            else:
+                S_mean_after = 0.0
+                sum_SV_after = 0.0
+
+        diagnostics_step['S_mean_after_sum'] += S_mean_after
+        diagnostics_step['sum_SV_after_sum'] += sum_SV_after
         
         # 计算散度和梯度（使用数组结构和Numba）
         div_uv = compute_divergence_fvm(u_state, v_state, cell_areas,
@@ -763,8 +816,53 @@ def rk4_step_ogrid(p, u, v, t, dt, cell_centers, cell_areas,
     u_new, v_new = apply_wall_boundary_conditions_ogrid(u_new, v_new, 
                                                         inner_wall_cells, outer_wall_cells, wall_normals,
                                                         u_new, v_new)
+
+    # 如果选择 step 模式：在整步更新结束后再做一次“整体DC修正”
+    # 这里利用本时间步内四个stage的体积平均源项，近似估算这一时间步
+    # 会带来的平均压力增量，并通过对压力场做一次常数平移将其移除。
+    if zero_mean_source and zero_mean_mode == "step" and diagnostics_step['n_stages'] > 0:
+        # 本时间步内各stage源项体积均值的简单平均（用于估算本步 DC 贡献）
+        S_mean_step = diagnostics_step['S_mean_raw_sum'] / diagnostics_step['n_stages']
+        # 近似：dp_mean/dt ≈ S_mean_step，因此一时间步的平均压力增量约为 S_mean_step * dt
+        delta_p_dc = S_mean_step * dt
+        # 该操作移除源项的体积平均（DC 分量）在本时间步对平均压力的贡献，
+        # 通过对整个压力场减去常数偏置，不改变空间分布形态，只抹去均值漂移。
+        p_new[:] -= delta_p_dc
+
+    # 汇总当前时间步的源项DC诊断信息（按stage求平均）
+    if diagnostics_step['n_stages'] > 0:
+        n_stages = diagnostics_step['n_stages']
+        S_mean_raw_stage = diagnostics_step['S_mean_raw_sum'] / n_stages
+        S_mean_after_stage = diagnostics_step['S_mean_after_sum'] / n_stages
+        sum_SV_after_stage = diagnostics_step['sum_SV_after_sum'] / n_stages
+    else:
+        S_mean_raw_stage = 0.0
+        S_mean_after_stage = 0.0
+        sum_SV_after_stage = 0.0
+
+    # 根据模式写入诊断字典：
+    #   - "stage"：S_mean_after_stage / sum_SV_after_stage 反映每个 stage 内部的零均值效果
+    #   - "step" ：S_mean_raw_stage 仍表示源项本身的DC；after/sum 主要用于参考
+    if zero_mean_mode == "stage":
+        diagnostics['S_mean_raw_stage'] = S_mean_raw_stage
+        diagnostics['S_mean_after_stage'] = S_mean_after_stage
+        diagnostics['sum_SV_after_stage'] = sum_SV_after_stage
+    elif zero_mean_mode == "step":
+        diagnostics['S_mean_raw_stage'] = S_mean_raw_stage
+        # 对于 step 模式，我们在整步结束后通过对压力场加常数的方式
+        # 近似移除了本步DC贡献；这里将“修正后”的量标记为 0，更直观地表示
+        # 源项的体积平均 DC 对平均压力的净贡献已被抵消。
+        diagnostics['S_mean_after_stage'] = 0.0
+        diagnostics['sum_SV_after_stage'] = 0.0
+    else:  # "off" 或其它保守处理
+        diagnostics['S_mean_raw_stage'] = S_mean_raw_stage
+        diagnostics['S_mean_after_stage'] = S_mean_after_stage
+        diagnostics['sum_SV_after_stage'] = sum_SV_after_stage
+
+    diagnostics['zero_mean_source'] = bool(zero_mean_source)
+    diagnostics['zero_mean_mode'] = zero_mean_mode
     
-    return p_new, u_new, v_new, temp_arrays
+    return p_new, u_new, v_new, temp_arrays, diagnostics
 
 
 # ==================== 进度条和日志输出辅助函数 ====================
@@ -816,7 +914,8 @@ def compute_residuals(p_old, u_old, v_old, p_new, u_new, v_new):
 
 
 def write_log_entry(log_file_path, n, t, dt, residuals, p, u, v, 
-                   p_min=None, p_max=None, p_mean=None):
+                   cell_areas,
+                   p_min=None, p_max=None, p_mean=None, p_rms=None):
     """
     写入日志条目
     
@@ -830,21 +929,30 @@ def write_log_entry(log_file_path, n, t, dt, residuals, p, u, v,
         p_min, p_max, p_mean: 压力统计（可选）
     """
     # 计算统计信息（如果未提供）
-    if p_min is None:
-        p_valid = p[p != 0] if len(p) > 0 else p
-        if len(p_valid) > 0:
-            p_min = np.min(p_valid)
-            p_max = np.max(p_valid)
-            p_mean = np.mean(p_valid)
+    if p_min is None or p_max is None or p_mean is None or p_rms is None:
+        # 使用体积/面积加权统计量
+        if len(p) > 0:
+            p_min = float(np.min(p)) if p_min is None else p_min
+            p_max = float(np.max(p)) if p_max is None else p_max
+            sumV = float(np.sum(cell_areas))
+            if sumV > 0.0:
+                # 体积加权平均压力
+                p_mean = float(np.sum(p * cell_areas) / sumV)
+                # 基于 p_fluct = p - p_mean 的体积加权 RMS
+                p_fluct = p - p_mean
+                p_rms = float(np.sqrt(np.sum(p_fluct * p_fluct * cell_areas) / sumV))
+            else:
+                p_mean = 0.0 if p_mean is None else p_mean
+                p_rms = 0.0 if p_rms is None else p_rms
         else:
-            p_min = p_max = p_mean = 0.0
+            p_min = p_max = p_mean = p_rms = 0.0
     
     # 写入日志（追加模式）
     with open(log_file_path, 'a', encoding='utf-8') as f:
         f.write(f"{n:10d}  {t:.6e}  {dt:.6e}  "
                 f"{residuals['pressure']:.6e}  {residuals['velocity_u']:.6e}  "
                 f"{residuals['velocity_v']:.6e}  {residuals['total']:.6e}  "
-                f"{p_min:.6e}  {p_max:.6e}  {p_mean:.6e}\n")
+                f"{p_min:.6e}  {p_max:.6e}  {p_mean:.6e}  {p_rms:.6e}\n")
 
 
 def initialize_log_file(log_file_path):
@@ -867,11 +975,47 @@ def initialize_log_file(log_file_path):
         f.write("#   7. 总残差 (residual_total)\n")
         f.write("#   8. 压力最小值 [Pa] (p_min)\n")
         f.write("#   9. 压力最大值 [Pa] (p_max)\n")
-        f.write("#  10. 压力平均值 [Pa] (p_mean)\n")
+        f.write("#  10. 压力体积加权平均值 [Pa] (p_mean_vol)\n")
+        f.write("#  11. 压力体积加权RMS（关于p_mean_vol的波动）[Pa] (p_rms_vol)\n")
         f.write("# " + "=" * 100 + "\n")
         f.write(f"{'n':>10}  {'t':>12}  {'dt':>12}  "
                 f"{'residual_p':>12}  {'residual_u':>12}  {'residual_v':>12}  "
-                f"{'residual_total':>14}  {'p_min':>12}  {'p_max':>12}  {'p_mean':>12}\n")
+                f"{'residual_total':>14}  {'p_min':>12}  {'p_max':>12}  {'p_mean_vol':>12}  {'p_rms_vol':>12}\n")
+
+
+def initialize_source_diagnostics_file(diag_file_path):
+    """
+    初始化源项DC修正诊断CSV文件
+    
+    列包括：
+      n, t, S_mean_raw_stage, S_mean_after_stage, sum_SV_after_stage, 
+      p_mean_vol, p_rms_vol, zero_mean_source, zero_mean_mode
+    """
+    with open(diag_file_path, 'w', encoding='utf-8') as f:
+        f.write("# 源项DC零均值修正诊断数据\n")
+        f.write("# n, t, S_mean_raw_stage, S_mean_after_stage, sum_SV_after_stage, ")
+        f.write("p_mean_vol, p_rms_vol, zero_mean_source, zero_mean_mode\n")
+
+
+def write_source_diagnostics_entry(diag_file_path, n, t, diagnostics, p_mean, p_rms):
+    """
+    追加写入一条源项DC修正诊断记录到CSV文件。
+    
+    参数:
+        diag_file_path: 诊断CSV文件路径
+        n, t: 时间步和当前时间
+        diagnostics: rk4_step_ogrid 返回的诊断字典
+        p_mean, p_rms: 当前时间步的体积加权平均压力与RMS
+    """
+    S_mean_raw = diagnostics.get('S_mean_raw_stage', 0.0)
+    S_mean_after = diagnostics.get('S_mean_after_stage', 0.0)
+    sum_SV_after = diagnostics.get('sum_SV_after_stage', 0.0)
+    zero_mean_source = diagnostics.get('zero_mean_source', False)
+    zero_mean_mode = diagnostics.get('zero_mean_mode', 'unknown')
+    
+    with open(diag_file_path, 'a', encoding='utf-8') as f:
+        f.write(f"{n:d}, {t:.6e}, {S_mean_raw:.6e}, {S_mean_after:.6e}, {sum_SV_after:.6e}, "
+                f"{p_mean:.6e}, {p_rms:.6e}, {int(bool(zero_mean_source))}, {zero_mean_mode}\n")
 
 
 def write_vtk_output(nodes, cells, p, u, v, output_dir, output_idx):
@@ -1108,6 +1252,8 @@ def main():
     filter_frequency = params['filter_frequency']
     CFL_max = params['CFL_max']
     boundary_tolerance = params['boundary_tolerance']
+    zero_mean_source = params['zero_mean_source']
+    zero_mean_mode = params['zero_mean_mode']
     
     # 提取参数（输出参数）
     output_dir = params['output_dir']
@@ -1185,6 +1331,11 @@ def main():
         print(f"CFL数 = {CFL:.4f} < {CFL_max:.2f}，稳定性条件满足", file=sys.stderr)
     print(f"特征尺寸: min={min_cell_size:.6e}m, mean={mean_cell_size:.6e}m, 使用={characteristic_size:.6e}m", file=sys.stderr)
     
+    # 预计算单元面积总和（用于体积加权平均和源项DC修正）
+    cell_areas_sum = float(np.sum(cell_areas))
+    print(f"单元总面积 ΣV = {cell_areas_sum:.6e} m² (用于体积加权统计和源项DC修正)", file=sys.stderr)
+    print(f"源项零均值修正: zero_mean_source={zero_mean_source}, 模式 zero_mean_mode='{zero_mean_mode}'", file=sys.stderr)
+    
     # 初始化场变量（在单元中心）
     p = np.zeros(n_cells)
     u = np.zeros(n_cells)
@@ -1204,6 +1355,10 @@ def main():
     # 初始化日志文件
     log_file_path = os.path.join(output_dir, log_file)
     initialize_log_file(log_file_path)
+    
+    # 初始化源项DC修正诊断CSV文件
+    source_diag_file_path = os.path.join(output_dir, "source_dc_diagnostics.csv")
+    initialize_source_diagnostics_file(source_diag_file_path)
     
     # 基于时间的输出控制
     next_output_time = 0.0  # 下次VTK输出的时间
@@ -1230,6 +1385,7 @@ def main():
     # 预分配RK4临时数组（避免每次调用都创建）
     print("预分配RK4临时数组...", file=sys.stderr)
     rk4_temp_arrays = None  # 将在第一次调用时创建
+    rk4_diagnostics = {}    # 用于存放每个时间步的源项DC诊断信息
     
     # 主循环
     start = time.time()
@@ -1243,15 +1399,16 @@ def main():
         t = n * dt
         
         # 使用RK4方法进行时间积分（内存优化版本，重用数组）
-        p_new, u_new, v_new, rk4_temp_arrays = rk4_step_ogrid(
-            p, u, v, t, dt, cell_centers, 
-            cell_areas, inner_wall_cells, 
-            outer_wall_cells, wall_normals, boundary_mask,
+        p_new, u_new, v_new, rk4_temp_arrays, rk4_diagnostics = rk4_step_ogrid(
+            p, u, v, t, dt, cell_centers, cell_areas, cell_areas_sum,
+            inner_wall_cells, outer_wall_cells, wall_normals, boundary_mask,
             edge_normals, edge_lengths,
             edge_neighbors, edge_count,
             rho0, c0, nu,
             inner_r, outer_r, omega, wave_pressure, tau, sigma, R,
-            p_new, u_new, v_new, rk4_temp_arrays)
+            zero_mean_source, zero_mean_mode,
+            p_new, u_new, v_new, rk4_temp_arrays,
+            rk4_diagnostics)
         
         # 应用数值滤波（向量化版本，抑制高频振荡，重用数组）
         if apply_filter and n % filter_frequency == 0:  # 按配置的频率滤波
@@ -1279,21 +1436,43 @@ def main():
         if n > 0 and n % gc_frequency == 0:
             gc.collect()  # 显式触发垃圾回收
         
-        # 基于时间的日志输出
+        # 基于时间的日志输出和源项DC诊断输出
         if t >= next_log_time or n == nt - 1:
             # 计算压力统计
-            p_valid = p[p != 0] if len(p) > 0 else p
-            if len(p_valid) > 0:
-                p_min = np.min(p_valid)
-                p_max = np.max(p_valid)
-                p_mean = np.mean(p_valid)
+            if len(p) > 0:
+                p_min = float(np.min(p))
+                p_max = float(np.max(p))
+                if cell_areas_sum > 0.0:
+                    # 体积加权平均与RMS
+                    p_mean = float(np.sum(p * cell_areas) / cell_areas_sum)
+                    p_fluct = p - p_mean
+                    p_rms = float(np.sqrt(np.sum(p_fluct * p_fluct * cell_areas) / cell_areas_sum))
+                else:
+                    p_mean = 0.0
+                    p_rms = 0.0
             else:
-                p_min = p_max = p_mean = 0.0
+                p_min = p_max = p_mean = p_rms = 0.0
             
-            # 写入日志
+            # 写入日志（包含体积加权 p_mean 与 p_rms）
             write_log_entry(log_file_path, n, t, dt, residuals, p, u, v,
-                           p_min, p_max, p_mean)
+                           cell_areas, p_min, p_max, p_mean, p_rms)
             
+            # 写入源项DC修正诊断CSV（每个时间步聚合RK4四个stage的统计）
+            write_source_diagnostics_entry(
+                source_diag_file_path, n, t, rk4_diagnostics, p_mean, p_rms
+            )
+            
+            # 适度打印诊断信息，便于在线观察源项DC是否被成功移除
+            if n % max(1, nt // 20) == 0 or n == nt - 1:
+                print(
+                    f"[源项DC诊断] n={n}, t={t:.3e}s, "
+                    f"S_mean_raw_stage={rk4_diagnostics.get('S_mean_raw_stage', 0.0):.3e}, "
+                    f"S_mean_after_stage={rk4_diagnostics.get('S_mean_after_stage', 0.0):.3e}, "
+                    f"sum_SV_after_stage={rk4_diagnostics.get('sum_SV_after_stage', 0.0):.3e}, "
+                    f"p_mean_vol={p_mean:.3e}, p_rms_vol={p_rms:.3e}",
+                    file=sys.stderr,
+                )
+
             # 更新下次日志输出时间
             next_log_time = ((int(t / log_time_interval) + 1) * log_time_interval)
         

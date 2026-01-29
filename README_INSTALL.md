@@ -96,7 +96,9 @@ python plane_2D_Ogrid.py
 - **日志文件**：自动记录到 `output_ogrid/simulation_log.txt`，包含：
   - 时间步数和当前时间
   - 压力、速度残差
-  - 压力统计（最小值、最大值、平均值）
+  - 压力统计（最小值、最大值）
+  - 压力体积加权平均值 `p_mean_vol(t)` 与体积加权 RMS `p_rms_vol(t)`
+- **源项 DC 诊断文件**：`output_ogrid/source_dc_diagnostics.csv`，记录每步源项 DC 相关统计量，便于检查平均压力漂移是否被抑制
 - **VTK输出**：基于时间间隔输出，更加直观（由 `output_time_interval` 控制）
 - **日志输出**：基于时间间隔输出（由 `log_time_interval` 控制）
 
