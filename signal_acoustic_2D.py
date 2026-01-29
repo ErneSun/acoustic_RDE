@@ -11,9 +11,9 @@ L = 2 * np.pi * R  # 周长 = 2πR
 H = 0.01  # 管道高度 [m]
 diameter = 2 * R  # 管道直径 [m]
 v_rde = 1400  # 爆轰波速度 [m/s]
-wave_height = 0.002  # 爆轰波高度 [m]
+wave_height = 0.003  # 爆轰波高度 [m]
 wave_pressure = 10.0  # 爆轰波最大压强 [Pa] (注意：10 Pa，不是10 atm)
-tilt_angle = 10  # 前倾角度 [度]
+tilt_angle = 0  # 前倾角度 [度]
 tilt_rad = np.radians(tilt_angle)  # 转换为弧度
 x_N_points = 1000  # 网格点数
 y_N_points = 500
@@ -53,7 +53,7 @@ for t in t_vals:
     # 逐层遍历y轴（高度）
     pressure_layer = np.zeros_like(X) + 1
     for i in range(len(y)):
-        if y[i] < 0.002:
+        if y[i] < wave_height:
             pressure_layer[i, :] = pressure_field(X[i, :], y[i], t, wave_pressure, tilt_rad)
     frames.append(pressure_layer)
 

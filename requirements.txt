@@ -6,12 +6,19 @@
 numpy>=1.20.0
 
 # 网格处理库（用于生成和读写VTK文件）
+# mesh.py和plane_2D_Ogrid.py需要
 meshio>=5.0.0
 
 # 可视化库（用于signal_acoustic_1D.py和signal_acoustic_2D.py）
+# 如果只需要运行模拟代码，可以不安装
 matplotlib>=3.3.0
 
+# 可选：性能加速库（plane_2D_Ogrid.py中可选使用）
+# 如果未安装，代码会自动使用纯numpy实现
+# numba>=0.56.0
+
 # 注意：
-# - argparse, multiprocessing, functools, os, sys, time 是Python标准库，无需安装
+# - argparse, multiprocessing, functools, os, sys, time, gc 是Python标准库，无需安装
 # - 如果只需要运行plane_2D.py和mesh.py，可以只安装numpy和meshio
-# - 如果需要运行可视化脚本，需要安装matplotlib
+# - 如果需要运行可视化脚本（signal_acoustic_*.py），需要安装matplotlib
+# - numba是可选的，安装后可以进一步提升plane_2D_Ogrid.py的性能

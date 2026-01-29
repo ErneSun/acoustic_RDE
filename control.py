@@ -37,8 +37,13 @@ def control():
     # ==================== 声源参数 ====================
     wave_pressure = 10.0      # 爆轰波压强幅度 [Pa]
     v_rde = 1400.0            # 爆轰波传播速度 [m/s]
-    inner_r  = r_core         # 环带内半径 [m]
-    outer_r  = R              # 环带外半径 [m]
+    # 爆轰波在径向上的宽度 [m]，从外壁向内量
+    # 物理含义：爆轰波被压缩在靠近外壁的一条窄带内
+    detonation_width = 0.001   # 例如：1 mm 宽度
+    # 根据爆轰波宽度自动确定源项作用的径向范围
+    # 内半径不能小于 r_core，避免跨越内壁
+    inner_r  = max(R - detonation_width, r_core)   # 环带内半径 [m]
+    outer_r  = R                                   # 环带外半径 [m]（始终贴在外壁）
     omega    = v_rde / R      # 角速度 [rad/s]
     sigma    = 0.001          # 衰减尺度 [m]
     tau = 2 * np.pi * R / v_rde  # 特征时间 [s]
@@ -103,6 +108,7 @@ def control():
         # 声源参数
         'wave_pressure': wave_pressure,
         'v_rde': v_rde,
+        'detonation_width': detonation_width,
         'inner_r': inner_r,
         'outer_r': outer_r,
         'omega': omega,
@@ -163,6 +169,7 @@ def validate_params(params):
         # 声源参数
         'wave_pressure': '爆轰波压强幅度 [Pa]',
         'v_rde': '爆轰波传播速度 [m/s]',
+        'detonation_width': '爆轰波径向宽度（从外壁向内） [m]',
         'inner_r': '环带内半径 [m]',
         'outer_r': '环带外半径 [m]',
         'omega': '角速度 [rad/s]',
@@ -200,7 +207,8 @@ def validate_params(params):
             if value is None:
                 invalid_params.append((param, description, "值为None"))
             elif param in ['rho0', 'c0', 'nu', 'R', 'r_core', 'dr', 'dt', 't_end', 
-                          'wave_pressure', 'v_rde', 'inner_r', 'outer_r', 'omega', 
+                          'wave_pressure', 'v_rde', 'detonation_width',
+                          'inner_r', 'outer_r', 'omega', 
                           'sigma', 'tau', 'filter_strength', 'filter_frequency', 
                           'CFL_max', 'boundary_tolerance', 'output_time_interval',
                           'log_time_interval', 'progress_bar_width', 'dtheta_base']:
@@ -209,7 +217,8 @@ def validate_params(params):
                     float(value)
                     # 检查是否为正数（某些参数必须为正）
                     if param in ['rho0', 'c0', 'R', 'r_core', 'dr', 'dt', 't_end', 
-                                'wave_pressure', 'v_rde', 'CFL_max', 'output_time_interval',
+                                'wave_pressure', 'v_rde', 'detonation_width',
+                                'CFL_max', 'output_time_interval',
                                 'log_time_interval', 'progress_bar_width', 'dtheta_base']:
                         if float(value) <= 0:
                             invalid_params.append((param, description, f"值必须为正数，当前值: {value}"))
@@ -248,6 +257,7 @@ if __name__ == "__main__":
     print("\n声源参数:")
     print(f"  爆轰波压强幅度: {params['wave_pressure']} Pa")
     print(f"  爆轰波传播速度: {params['v_rde']} m/s")
+    print(f"  爆轰波径向宽度: {params['detonation_width']} m (从外壁向内)")
     print(f"  角速度 (omega): {params['omega']} rad/s")
     print(f"  衰减尺度 (sigma): {params['sigma']} m")
     print(f"  特征时间 (tau): {params['tau']} s")
